@@ -1,11 +1,9 @@
-import React, { useState } from 'react';
-import { Plus, Smartphone, Users, Wifi, WifiOff, AlertCircle, CheckCircle, RefreshCw } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Plus, Smartphone, Users, Wifi, WifiOff, AlertCircle, CheckCircle, RefreshCw, LogOut } from 'lucide-react';
 import { useCampaign } from '../contexts/CampaignContext';
 import SessionCard from './SessionCard';
 import GroupList from './GroupList';
 import CampaignComposer from './CampaignComposer';
-import io from 'socket.io-client';
-const socket = io('http://localhost:3001');
 
 const Dashboard: React.FC = () => {
   const { 
@@ -13,9 +11,12 @@ const Dashboard: React.FC = () => {
     isConnected, 
     createSession, 
     disconnectSession,
+    logoutAllSessions,
     refreshGroups,
     getTotalSelectedGroups,
-    toggleGroupSelection // ✅ Extract this at component level
+    toggleGroupSelection,
+    selectAllGroups,
+    getSocket // Get the socket accessor function
   } = useCampaign();
   const [activeTab, setActiveTab] = useState<'sessions' | 'groups' | 'campaigns'>('sessions');
   const [refreshingSession, setRefreshingSession] = useState<string | null>(null);
@@ -23,25 +24,46 @@ const Dashboard: React.FC = () => {
   const connectedSessions = sessions.filter(s => s.status === 'connected');
   const totalGroups = sessions.reduce((total, session) => total + session.groups.length, 0);
   const selectedGroups = getTotalSelectedGroups();
-  // In your React component
-socket.on('client-ready', (data) => {
-  console.log('Client ready:', data);
-  
-  // Wait 35 seconds then check if groups loaded
-  setTimeout(() => {
-    socket.emit('debug-session', { sessionId: data.sessionId });
-  }, 35000);
-});
 
-socket.on('debug-info', (data) => {
-  console.log('Debug info:', data);
-  
-  // If groups not loaded, try manual refresh
-  if (!data.session?.groupsLoaded) {
-    console.log('Groups not loaded, trying refresh...');
-    socket.emit('refresh-groups', { sessionId: data.sessionId });
-  }
-});
+  // Use the socket from context instead of creating a new one
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socket) return;
+
+    const handleClientReady = (data: any) => {
+      console.log('Client ready:', data);
+      
+      // Wait 35 seconds then check if groups loaded
+      setTimeout(() => {
+        const currentSocket = getSocket();
+        if (currentSocket) {
+          currentSocket.emit('debug-session', { sessionId: data.sessionId });
+        }
+      }, 35000);
+    };
+
+    const handleDebugInfo = (data: any) => {
+      console.log('Debug info:', data);
+      
+      // If groups not loaded, try manual refresh
+      if (!data.session?.groupsLoaded) {
+        console.log('Groups not loaded, trying refresh...');
+        const currentSocket = getSocket();
+        if (currentSocket) {
+          currentSocket.emit('refresh-groups', { sessionId: data.sessionId });
+        }
+      }
+    };
+
+    socket.on('client-ready', handleClientReady);
+    socket.on('debug-info', handleDebugInfo);
+
+    // Cleanup event listeners
+    return () => {
+      socket.off('client-ready', handleClientReady);
+      socket.off('debug-info', handleDebugInfo);
+    };
+  }, [getSocket]);
 
   // Handle session refresh
   const handleRefreshGroups = async (sessionId: string) => {
@@ -104,6 +126,16 @@ socket.on('debug-info', (data) => {
                 {sessions.length}/10
               </span>
             </button>
+
+            {sessions.length > 0 && (
+              <button
+                onClick={logoutAllSessions}
+                className="flex items-center space-x-2 bg-orange-600 hover:bg-orange-700 px-4 py-2 rounded-lg transition-colors"
+              >
+                <LogOut className="h-5 w-5" />
+                <span>Logout All</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -242,7 +274,7 @@ socket.on('debug-info', (data) => {
                     </div>
 
                     {/* Session Content */}
-                    {session.status === 'waiting_for_scan' && session.qrCode && (
+                    {session.status === 'waiting_scan' && session.qrCode && (
                       <div className="text-center">
                         <img 
                           src={session.qrCode} 
@@ -397,16 +429,37 @@ socket.on('debug-info', (data) => {
                         </div>
                       </div>
                       
-                      <button
-                        onClick={() => handleRefreshGroups(session.id)}
-                        disabled={refreshingSession === session.id || session.groupsLoading}
-                        className="flex items-center space-x-2 px-3 py-2 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:cursor-not-allowed rounded-lg transition-colors"
-                      >
-                        <RefreshCw 
-                          className={`h-4 w-4 ${refreshingSession === session.id ? 'animate-spin' : ''}`} 
-                        />
-                        <span>Refresh</span>
-                      </button>
+                      <div className="flex space-x-2">
+                        <button
+                          onClick={() => handleRefreshGroups(session.id)}
+                          disabled={refreshingSession === session.id || session.groupsLoading}
+                          className="flex items-center space-x-2 px-3 py-2 text-sm bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 disabled:cursor-not-allowed rounded-lg transition-colors"
+                        >
+                          <RefreshCw 
+                            className={`h-4 w-4 ${refreshingSession === session.id ? 'animate-spin' : ''}`} 
+                          />
+                          <span>Refresh</span>
+                        </button>
+
+                        {session.groups.length > 0 && (
+                          <>
+                            <button
+                              onClick={() => selectAllGroups(session.id, true)}
+                              className="flex items-center space-x-2 px-3 py-2 text-sm bg-green-700 hover:bg-green-600 rounded-lg transition-colors"
+                            >
+                              <CheckCircle className="h-4 w-4" />
+                              <span>Select All</span>
+                            </button>
+                            <button
+                              onClick={() => selectAllGroups(session.id, false)}
+                              className="flex items-center space-x-2 px-3 py-2 text-sm bg-red-700 hover:bg-red-600 rounded-lg transition-colors"
+                            >
+                              <AlertCircle className="h-4 w-4" />
+                              <span>Deselect All</span>
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </div>
 
                     {/* Groups Loading Progress */}
@@ -489,7 +542,7 @@ socket.on('debug-info', (data) => {
 
         {activeTab === 'campaigns' && (
           <div className="space-y-6">
-            {React.createElement(CampaignComposer as any, { socket })}
+            {React.createElement(CampaignComposer as any, { socket: getSocket() })}
           </div>
         )}
       </div>

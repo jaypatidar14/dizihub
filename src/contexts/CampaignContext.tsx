@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useReducer, useEffect, ReactNode, useCallback } from 'react';
+import React, { createContext, useContext, useReducer, useEffect, ReactNode, useCallback, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
 
 export interface WhatsAppGroup {
@@ -14,7 +14,7 @@ export interface WhatsAppGroup {
 
 export interface WhatsAppSession {
   id: string;
-  status: 'disconnected' | 'initializing' | 'waiting_for_scan' | 'authenticated' | 'loading' | 'connected' | 'auth_failure';
+  status: 'disconnected' | 'initializing' | 'waiting_scan' | 'authenticated' | 'loading' | 'connected' | 'auth_failure';
   phoneNumber?: string;
   qrCode?: string;
   groups: WhatsAppGroup[];
@@ -71,7 +71,14 @@ function campaignReducer(state: CampaignState, action: CampaignAction): Campaign
         ...state,
         sessions: state.sessions.map(session =>
           session.id === action.payload.sessionId
-            ? { ...session, ...action.payload.updates }
+            ? { 
+                ...session, 
+                ...action.payload.updates,
+                // Preserve groups if not explicitly updating them
+                groups: action.payload.updates.groups !== undefined 
+                  ? action.payload.updates.groups 
+                  : session.groups || []
+              }
             : session
         ),
       };
@@ -185,11 +192,18 @@ function campaignReducer(state: CampaignState, action: CampaignAction): Campaign
 interface CampaignContextType extends CampaignState {
   createSession: () => void;
   disconnectSession: (sessionId: string) => void;
+  logoutSession: (sessionId: string) => void;
+  logoutAllSessions: () => void;
   refreshGroups: (sessionId: string) => void;
   toggleGroupSelection: (sessionId: string, groupId: string) => void;
+  selectAllGroups: (sessionId: string, select: boolean) => void;
   getSelectedGroups: (sessionId: string) => WhatsAppGroup[];
   getTotalSelectedGroups: () => number;
   clearDisconnectedSessions: () => void;
+  initializeSocket: () => void;
+  closeSocket: () => void;
+  getSocket: () => Socket | null;
+  forceReady: (sessionId: string) => void;
 }
 
 const CampaignContext = createContext<CampaignContextType | undefined>(undefined);
@@ -208,36 +222,79 @@ interface CampaignProviderProps {
 
 export const CampaignProvider: React.FC<CampaignProviderProps> = ({ children }) => {
   const [state, dispatch] = useReducer(campaignReducer, initialState);
+  const socketInitializing = useRef(false);
+  const socketInitialized = useRef(false);
+  const creatingSession = useRef(false); // Add session creation flag
 
-  useEffect(() => {
-    // Initialize socket connection with reconnection options
+  const initializeSocket = useCallback(() => {
+    // Prevent multiple socket connections using refs
+    if (socketInitializing.current || socketInitialized.current || state.socket) {
+      console.log('Socket already initialized or initializing');
+      return;
+    }
+
+    // Get authentication token from localStorage
+    const token = localStorage.getItem('whatsapp_auth_token');
+    
+    if (!token) {
+      console.error('No authentication token found');
+      return;
+    }
+
+    console.log('Initializing socket connection...');
+    socketInitializing.current = true;
+
+    // Initialize socket connection with authentication
     const socket = io('http://localhost:3001', {
       autoConnect: true,
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionAttempts: 5,
-      timeout: 20000,
+      timeout: 10000,
+      auth: {
+        token: token
+      },
+      forceNew: false, // Reuse connection if possible
+      transports: ['websocket', 'polling'] // Try websocket first, fallback to polling
     });
 
     dispatch({ type: 'SET_SOCKET', payload: socket });
+    socketInitialized.current = true;
+    socketInitializing.current = false;
 
     // Socket event listeners
     socket.on('connect', () => {
-      console.log('Connected to server');
+      console.log('✅ Connected to server');
       dispatch({ type: 'SET_CONNECTED', payload: true });
       
       // Clear disconnected sessions on reconnect
       dispatch({ type: 'CLEAR_DISCONNECTED_SESSIONS' });
+      
+      // Reset session creation flag on reconnect
+      creatingSession.current = false;
     });
 
-    socket.on('disconnect', () => {
-      console.log('Disconnected from server');
+    socket.on('disconnect', (reason) => {
+      console.log('❌ Disconnected from server:', reason);
       dispatch({ type: 'SET_CONNECTED', payload: false });
     });
 
-    socket.on('connect_error', (error) => {
-      console.error('Connection error:', error);
+    socket.on('reconnect', (attemptNumber) => {
+      console.log('🔄 Reconnected to server after', attemptNumber, 'attempts');
+      dispatch({ type: 'SET_CONNECTED', payload: true });
+    });
+
+    socket.on('connect_error', (error: any) => {
+      console.error('❌ Connection error:', error);
       dispatch({ type: 'SET_CONNECTED', payload: false });
+    });
+
+    // Handle Chrome extension errors gracefully
+    window.addEventListener('unhandledrejection', (event) => {
+      if (event.reason?.message?.includes('message channel closed')) {
+        console.warn('Chrome extension message channel closed, this is normal');
+        event.preventDefault(); // Prevent the error from showing in console
+      }
     });
 
     // Receive initial sessions data (only active sessions)
@@ -260,14 +317,45 @@ export const CampaignProvider: React.FC<CampaignProviderProps> = ({ children }) 
 
     // Handle QR code updates
     socket.on('qr-code', (data: any) => {
-      console.log('QR code received for session:', data.sessionId);
+      console.log('🔍 QR code received:', {
+        sessionId: data.sessionId,
+        hasQrCode: !!data.qrCode,
+        status: data.status,
+        qrCodeLength: data.qrCode?.length,
+        qrCodePreview: data.qrCode?.substring(0, 50) + '...'
+      });
+      
+      // Add a small delay to ensure state is properly updated
+      setTimeout(() => {
+        dispatch({
+          type: 'UPDATE_SESSION',
+          payload: {
+            sessionId: data.sessionId,
+            updates: {
+              qrCode: data.qrCode,
+              status: data.status || 'waiting_scan',
+            },
+          },
+        });
+        console.log('📝 QR code state updated for session:', data.sessionId);
+      }, 100);
+    });
+
+    // Also handle session-qr event (backup)
+    socket.on('session-qr', (data: any) => {
+      console.log('🔍 Session QR received (backup):', {
+        sessionId: data.sessionId,
+        hasQrCode: !!data.qrCode,
+        qrCodeLength: data.qrCode?.length
+      });
+      
       dispatch({
         type: 'UPDATE_SESSION',
         payload: {
           sessionId: data.sessionId,
           updates: {
             qrCode: data.qrCode,
-            status: data.status,
+            status: 'waiting_scan',
           },
         },
       });
@@ -289,9 +377,24 @@ export const CampaignProvider: React.FC<CampaignProviderProps> = ({ children }) 
       });
     });
 
+    // Handle QR code expiry
+    socket.on('qr-expired', (data: any) => {
+      console.log('🕰️ QR code expired for session:', data.sessionId);
+      dispatch({
+        type: 'UPDATE_SESSION',
+        payload: {
+          sessionId: data.sessionId,
+          updates: {
+            qrCode: undefined,
+            status: 'disconnected',
+          },
+        },
+      });
+    });
+
     // Handle authentication success
     socket.on('authenticated', (data: any) => {
-      console.log('Authenticated:', data);
+      console.log('✅ Session authenticated, clearing QR code:', data);
       dispatch({
         type: 'UPDATE_SESSION',
         payload: {
@@ -299,6 +402,50 @@ export const CampaignProvider: React.FC<CampaignProviderProps> = ({ children }) 
           updates: {
             status: 'authenticated',
             qrCode: undefined,
+            phoneNumber: data.phoneNumber,
+          },
+        },
+      });
+      
+      // Set a timeout to check if groups are loaded, if not force ready
+      setTimeout(() => {
+        const currentSession = state.sessions.find(s => s.id === data.sessionId);
+        if (currentSession && currentSession.status === 'authenticated' && (!currentSession.groups || currentSession.groups.length === 0)) {
+          console.log(`⚠️ Session ${data.sessionId} authenticated but no groups loaded, triggering force ready`);
+          if (state.socket) {
+            state.socket.emit('force-ready', { sessionId: data.sessionId });
+          }
+        }
+      }, 8000); // Increased to 8 seconds to give more time for ready event
+    });
+
+    // Handle session authenticated from server
+    socket.on('session-authenticated', (data: any) => {
+      console.log('✅ Session authenticated event:', data);
+      dispatch({
+        type: 'UPDATE_SESSION',
+        payload: {
+          sessionId: data.sessionId,
+          updates: {
+            status: 'authenticated',
+            qrCode: undefined,
+            phoneNumber: data.phoneNumber,
+          },
+        },
+      });
+    });
+
+    // Handle session ready (connected)
+    socket.on('session-ready', (data: any) => {
+      console.log('🚀 Session ready:', data);
+      dispatch({
+        type: 'UPDATE_SESSION',
+        payload: {
+          sessionId: data.sessionId,
+          updates: {
+            status: 'connected',
+            qrCode: undefined,
+            phoneNumber: data.phoneNumber,
           },
         },
       });
@@ -449,6 +596,35 @@ export const CampaignProvider: React.FC<CampaignProviderProps> = ({ children }) 
       });
     });
 
+    // Handle logout success
+    socket.on('logout-success', (data: any) => {
+      console.log('Session logout successful:', data);
+      // Session will be removed via session-removed event
+    });
+
+    // Handle logout error
+    socket.on('logout-error', (data: any) => {
+      console.error('Session logout failed:', data);
+      alert(`Failed to logout session: ${data.error}`);
+    });
+
+    // Handle disconnect error
+    socket.on('disconnect-error', (data: any) => {
+      console.error('Session disconnect failed:', data);
+      alert(`Failed to disconnect session: ${data.error}`);
+      
+      // Reset session status back to its previous state since disconnect failed
+      dispatch({
+        type: 'UPDATE_SESSION',
+        payload: {
+          sessionId: data.sessionId,
+          updates: {
+            status: 'connected', // or whatever the previous status was
+          },
+        },
+      });
+    });
+
     // Handle group toggle response
     socket.on('group-toggled', (data: any) => {
       // server sends isSelected boolean — apply it explicitly (avoids double-toggle)
@@ -520,12 +696,35 @@ export const CampaignProvider: React.FC<CampaignProviderProps> = ({ children }) 
       alert(`Session error: ${data.error}`);
     });
 
-    return () => {
-      socket.close();
-    };
-  }, []);
+    // Handle force ready responses
+    socket.on('force-ready-success', (data: any) => {
+      console.log('✅ Force ready successful:', data.sessionId);
+    });
+
+    socket.on('force-ready-error', (data: any) => {
+      console.error('❌ Force ready failed:', data);
+    });
+  }, [state.socket]); // Add dependency array for useCallback
+
+  const closeSocket = useCallback(() => {
+    if (state.socket) {
+      console.log('Disconnecting socket');
+      state.socket.close();
+      dispatch({ type: 'SET_SOCKET', payload: null as any });
+      dispatch({ type: 'SET_CONNECTED', payload: false });
+      // Reset refs
+      socketInitialized.current = false;
+      socketInitializing.current = false;
+    }
+  }, [state.socket]);
 
   const createSession = () => {
+    // Prevent multiple rapid session creations
+    if (creatingSession.current) {
+      console.log('Session creation already in progress, ignoring...');
+      return;
+    }
+    
     if (state.sessions.length >= 10) {
       alert('Maximum 10 WhatsApp accounts allowed per seller');
       return;
@@ -536,6 +735,8 @@ export const CampaignProvider: React.FC<CampaignProviderProps> = ({ children }) 
       return;
     }
 
+    creatingSession.current = true;
+    
     const sessionId = `session_${Date.now()}`;
     const newSession: WhatsAppSession = {
       id: sessionId,
@@ -549,6 +750,14 @@ export const CampaignProvider: React.FC<CampaignProviderProps> = ({ children }) 
 
     if (state.socket) {
       state.socket.emit('create-session', { sessionId });
+      
+      // Reset flag after 3 seconds to allow new sessions
+      setTimeout(() => {
+        creatingSession.current = false;
+      }, 3000);
+    } else {
+      // Reset flag immediately if no socket
+      creatingSession.current = false;
     }
   };
 
@@ -577,6 +786,53 @@ export const CampaignProvider: React.FC<CampaignProviderProps> = ({ children }) 
       dispatch({ type: 'REMOVE_SESSION', payload: sessionId });
     }
   };
+
+  const logoutSession = useCallback((sessionId: string) => {
+    console.log('Logging out session:', sessionId);
+    
+    if (!confirm('Are you sure you want to logout this WhatsApp session? You will need to scan QR code again.')) {
+      return;
+    }
+
+    // Emit logout event to server
+    if (state.socket) {
+      state.socket.emit('logout-session', { sessionId });
+    } else {
+      console.error('No socket connection available for logout');
+    }
+  }, [state.socket]);
+
+  const logoutAllSessions = useCallback(() => {
+    console.log('Logging out all sessions');
+    
+    if (!confirm('Are you sure you want to logout ALL WhatsApp sessions? You will need to reconnect all accounts.')) {
+      return;
+    }
+
+    // Make API call to logout all sessions
+    const token = localStorage.getItem('token');
+    if (token) {
+      fetch('/api/sessions/logout-all', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      })
+      .then(response => response.json())
+      .then(data => {
+        if (data.success) {
+          console.log(`Successfully logged out ${data.deletedCount} sessions`);
+          // Sessions will be removed via socket events
+        } else {
+          console.error('Failed to logout all sessions:', data.error);
+        }
+      })
+      .catch(error => {
+        console.error('Error logging out all sessions:', error);
+      });
+    }
+  }, []);
 
   const refreshGroups = (sessionId: string) => {
     console.log('Refreshing groups for session:', sessionId);
@@ -654,6 +910,25 @@ export const CampaignProvider: React.FC<CampaignProviderProps> = ({ children }) 
     });
   }, [state.socket, state.sessions]);
 
+  const selectAllGroups = useCallback((sessionId: string, select: boolean) => {
+    const session = state.sessions.find(s => s.id === sessionId);
+    if (session && session.groups.length > 0) {
+      // Update all groups at once
+      const updatedGroups = session.groups.map(group => ({
+        ...group,
+        isSelected: select
+      }));
+      
+      dispatch({
+        type: 'UPDATE_GROUPS',
+        payload: {
+          sessionId,
+          groups: updatedGroups
+        }
+      });
+    }
+  }, [state.sessions]);
+
   const getSelectedGroups = (sessionId: string): WhatsAppGroup[] => {
     const session = state.sessions.find(s => s.id === sessionId);
     return session ? session.groups.filter(group => group.isSelected) : [];
@@ -669,15 +944,33 @@ export const CampaignProvider: React.FC<CampaignProviderProps> = ({ children }) 
     dispatch({ type: 'CLEAR_DISCONNECTED_SESSIONS' });
   };
 
+  const getSocket = useCallback(() => {
+    return state.socket;
+  }, [state.socket]);
+
+  const forceReady = useCallback((sessionId: string) => {
+    if (state.socket) {
+      console.log('🔧 Triggering force ready for session:', sessionId);
+      state.socket.emit('force-ready', { sessionId });
+    }
+  }, [state.socket]);
+
   const contextValue: CampaignContextType = {
     ...state,
     toggleGroupSelection,
+    selectAllGroups,
     createSession,
     disconnectSession,
+    logoutSession,
+    logoutAllSessions,
     refreshGroups,
     getSelectedGroups,
     getTotalSelectedGroups,
     clearDisconnectedSessions,
+    initializeSocket,
+    closeSocket,
+    getSocket,
+    forceReady,
   };
 
   return (

@@ -14,9 +14,11 @@ import {
   MessageSquare
 } from 'lucide-react';
 import { useCampaign } from '../contexts/CampaignContext';
+import { useNotifications } from '../contexts/NotificationContext';
 
 const CampaignComposer: React.FC = () => {
   const { sessions, getTotalSelectedGroups, socket } = useCampaign();
+  const { showSuccess, showError, showInfo, showWarning, addNotification } = useNotifications();
   const [message, setMessage] = useState('');
   const [mediaUrl, setMediaUrl] = useState('');
   const [mediaType, setMediaType] = useState<'image' | 'video' | null>(null);
@@ -49,14 +51,46 @@ const CampaignComposer: React.FC = () => {
   useEffect(() => {
     if (!socket) return;
 
+    // Listen for individual message results
+    const handleMessageSent = (data: any) => {
+      console.log('Message sent result:', data);
+      
+      if (data.success) {
+        showSuccess('Message Sent', `Message delivered successfully`);
+      } else {
+        showError('Message Failed', `Failed to send message: ${data.error}`);
+      }
+    };
+
+    // Listen for notifications from server
+    const handleNotification = (data: any) => {
+      console.log('Server notification:', data);
+      
+      addNotification({
+        type: data.type,
+        title: data.title,
+        message: data.message,
+        duration: data.type === 'success' ? 3000 : 5000,
+        taskId: data.taskId
+      });
+    };
+
     // Listen for bulk message progress
     const handleBulkProgress = (data: any) => {
       console.log('Bulk message progress:', data);
       setSendingProgress({
-        sent: data.progress.sent,
-        total: data.progress.total,
-        currentGroup: data.progress.current
+        sent: data.completed || data.progress?.sent || 0,
+        total: data.total || data.progress?.total || 0,
+        currentGroup: data.currentGroup || data.progress?.current || ''
       });
+
+      // Show progress notification
+      if (data.completed && data.total) {
+        showInfo(
+          'Campaign Progress', 
+          `Sent ${data.completed}/${data.total} messages (${data.success} successful, ${data.failed} failed)`
+        );
+      }
     };
 
     // Listen for bulk message completion
@@ -67,8 +101,25 @@ const CampaignComposer: React.FC = () => {
       
       const successCount = data.summary.success;
       const totalCount = data.summary.total;
+      const failedCount = data.summary.failed;
       
-      alert(`Campaign completed!\nSent: ${successCount}/${totalCount} messages\nFailed: ${data.summary.failed}`);
+      // Show completion notification with detailed results
+      if (successCount === totalCount) {
+        showSuccess(
+          'Campaign Completed Successfully!', 
+          `All ${totalCount} messages were sent successfully. Duration: ${Math.round(data.summary.duration / 1000)}s`
+        );
+      } else if (successCount > 0) {
+        showWarning(
+          'Campaign Completed with Issues', 
+          `Sent ${successCount}/${totalCount} messages successfully. ${failedCount} failed.`
+        );
+      } else {
+        showError(
+          'Campaign Failed', 
+          `All ${totalCount} messages failed to send. Please check your connection and try again.`
+        );
+      }
       
       // Reset form after successful send
       if (successCount > 0) {
@@ -87,7 +138,7 @@ const CampaignComposer: React.FC = () => {
     const handleBulkError = (data: any) => {
       console.error('Bulk message error:', data);
       setIsSending(false);
-      alert(`Campaign failed: ${data.error}`);
+      showError('Campaign Failed', `Campaign failed: ${data.error}`);
     };
 
     // Listen for bulk message started
@@ -98,20 +149,35 @@ const CampaignComposer: React.FC = () => {
         total: data.totalGroups,
         currentGroup: ''
       });
+      
+      showInfo('Campaign Started', `Starting to send messages to ${data.totalGroups} groups...`);
     };
 
+    // Listen for bulk message queued
+    const handleBulkQueued = (data: any) => {
+      console.log('Bulk message queued:', data);
+      showInfo('Messages Queued', data.message || 'Messages have been queued for sending');
+    };
+
+    // Add event listeners
+    socket.on('message-sent', handleMessageSent);
+    socket.on('notification', handleNotification);
     socket.on('bulk-message-progress', handleBulkProgress);
     socket.on('bulk-message-completed', handleBulkCompleted);
     socket.on('bulk-message-error', handleBulkError);
     socket.on('bulk-message-started', handleBulkStarted);
+    socket.on('bulk-message-queued', handleBulkQueued);
 
     return () => {
+      socket.off('message-sent', handleMessageSent);
+      socket.off('notification', handleNotification);
       socket.off('bulk-message-progress', handleBulkProgress);
       socket.off('bulk-message-completed', handleBulkCompleted);
       socket.off('bulk-message-error', handleBulkError);
       socket.off('bulk-message-started', handleBulkStarted);
+      socket.off('bulk-message-queued', handleBulkQueued);
     };
-  }, [socket]);
+  }, [socket, showSuccess, showError, showInfo, showWarning, addNotification]);
 
   const handleMediaUpload = (type: 'image' | 'video') => {
     // In a real app, this would handle file upload
@@ -141,17 +207,22 @@ const CampaignComposer: React.FC = () => {
 
   const handleSendCampaign = async () => {
     if (!message.trim()) {
-      alert('Please enter a message');
+      showWarning('Invalid Message', 'Please enter a message');
       return;
     }
 
     if (totalSelectedGroups === 0) {
-      alert('Please select at least one group from the Groups tab');
+      showWarning('No Groups Selected', 'Please select at least one group from the Groups tab');
       return;
     }
 
     if (!socket) {
-      alert('Socket connection not available. Please refresh the page.');
+      showError('Connection Error', 'Socket connection not available. Please refresh the page.');
+      return;
+    }
+
+    if (sessionSelectionInfo.length === 0) {
+      showError('No Connected Sessions', 'No connected WhatsApp sessions with selected groups');
       return;
     }
 
@@ -172,9 +243,18 @@ const CampaignComposer: React.FC = () => {
     if (isScheduled) {
       // For scheduled campaigns, we'll just show a confirmation
       // In a real app, you'd store this in a database with a job scheduler
-      alert(`Campaign "${campaignData.name}" has been scheduled for ${scheduledDate} at ${scheduledTime}`);
+      showSuccess(
+        'Campaign Scheduled', 
+        `Campaign "${campaignData.name}" has been scheduled for ${scheduledDate} at ${scheduledTime}`
+      );
       return;
     }
+
+    // Show initial sending notification
+    showInfo(
+      'Starting Campaign', 
+      `Sending messages to ${totalSelectedGroups} groups across ${sessionSelectionInfo.length} sessions...`
+    );
 
     setIsSending(true);
     setCampaignResults([]);
@@ -200,7 +280,7 @@ const CampaignComposer: React.FC = () => {
     } catch (error) {
       console.error('Error sending campaign:', error);
       setIsSending(false);
-      alert('Error sending campaign. Please try again.');
+      showError('Campaign Error', 'Error sending campaign. Please try again.');
     }
   };
 

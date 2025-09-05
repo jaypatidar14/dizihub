@@ -6,6 +6,8 @@ interface QRCodeDisplayProps {
 }
 
 const QRCodeDisplay: React.FC<QRCodeDisplayProps> = ({ qrCode }) => {
+  console.log('🎨 QRCodeDisplay rendering with qrCode:', qrCode?.substring(0, 50) + '...');
+  
   // Removed unused isLoading state
 
   const downloadQR = () => {

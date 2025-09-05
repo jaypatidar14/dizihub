@@ -46,6 +46,8 @@ app.use(cors({
 
 app.use(express.json());
 
+
+
 // MongoDB Connection
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://boltuser:boltuser@cluster0.c511gzk.mongodb.net/projectbolt';
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production';
@@ -1051,6 +1053,52 @@ class MessageQueue {
 // Initialize managers
 const sessionManager = new SessionManager();
 const messageQueue = new MessageQueue();
+// Authentication middleware
+const authenticateToken = async (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ error: 'Access token required' });
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const user = await User.findById(decoded.userId).select('-password');
+    
+    if (!user || !user.isActive) {
+      return res.status(403).json({ error: 'User not found or inactive' });
+    }
+
+    req.user = user;
+    next();
+  } catch (error) {
+    return res.status(403).json({ error: 'Invalid or expired token' });
+  }
+};
+
+// Socket authentication middleware
+const authenticateSocket = async (socket, next) => {
+  try {
+    const token = socket.handshake.auth.token;
+    if (!token) {
+      return next(new Error('Authentication error: No token provided'));
+    }
+
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const user = await User.findById(decoded.userId).select('-password');
+    
+    if (!user || !user.isActive) {
+      return next(new Error('User not found or inactive'));
+    }
+
+    socket.userId = user._id.toString();
+    socket.user = user;
+    next();
+  } catch (error) {
+    next(new Error('Authentication error: Invalid token'));
+  }
+};
 
 // Utility functions
 function safeDelete(filePath, maxRetries = 3, delay = 1000) {
@@ -1120,121 +1168,30 @@ const upload = multer({
   }
 });
 
+// Serve static files for uploads
 app.use('/files', express.static('uploads'));
 
-// JWT Authentication middleware
-const authenticateToken = async (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) {
-    return res.status(401).json({ error: 'Access token required' });
-  }
-
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    const user = await User.findById(decoded.userId).select('-password');
-    
-    if (!user || !user.isActive) {
-      return res.status(403).json({ error: 'User not found or inactive' });
+// Root route - API information
+app.get('/', (req, res) => {
+  res.json({
+    name: 'WhatsApp Campaign Manager API',
+    version: '1.0.0',
+    status: 'running',
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      health: '/health',
+      login: 'POST /api/auth/login',
+      validate: 'GET /api/auth/validate',
+      sessions: 'GET /api/sessions',
+      upload: 'POST /api/upload',
+      dashboard: 'GET /api/dashboard/stats'
+    },
+    docs: 'This is a backend API server. Frontend should be deployed separately.',
+    defaultCredentials: {
+      username: 'admin',
+      password: 'admin123'
     }
-
-    req.user = user;
-    next();
-  } catch (error) {
-    return res.status(403).json({ error: 'Invalid or expired token' });
-  }
-};
-
-// Socket authentication middleware
-const authenticateSocket = async (socket, next) => {
-  try {
-    const token = socket.handshake.auth.token;
-    if (!token) {
-      return next(new Error('Authentication error: No token provided'));
-    }
-
-    const decoded = jwt.verify(token, JWT_SECRET);
-    const user = await User.findById(decoded.userId).select('-password');
-    
-    if (!user || !user.isActive) {
-      return next(new Error('User not found or inactive'));
-    }
-
-    socket.userId = user._id.toString();
-    socket.user = user;
-    next();
-  } catch (error) {
-    next(new Error('Authentication error: Invalid token'));
-  }
-};
-
-// Initialize default user if none exists
-async function initializeDefaultUser() {
-  try {
-    const userCount = await User.countDocuments();
-    if (userCount === 0) {
-      const defaultPassword = process.env.DEFAULT_PASSWORD || 'admin123';
-      const hashedPassword = await bcrypt.hash(defaultPassword, 10);
-      
-      await User.create({
-        username: 'admin',
-        email: 'admin@whatsapp-manager.local',
-        password: hashedPassword
-      });
-      
-      console.log('✅ Default user created: admin / admin123');
-    }
-  } catch (error) {
-    console.error('❌ Error creating default user:', error);
-  }
-}
-
-// Cleanup functions
-async function cleanupOldData() {
-  try {
-    // Clean old messages (30 days)
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    
-    const messageResult = await MessageLog.deleteMany({
-      sentAt: { $lt: thirtyDaysAgo }
-    });
-
-    // Clean old uploads (90 days)
-    const ninetyDaysAgo = new Date();
-    ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
-    
-    const oldUploads = await Upload.find({
-      uploadedAt: { $lt: ninetyDaysAgo }
-    });
-
-    for (const upload of oldUploads) {
-      if (fs.existsSync(upload.path)) {
-        await safeDelete(upload.path);
-      }
-      await Upload.findByIdAndDelete(upload._id);
-    }
-
-    // Clean old disconnected sessions (7 days inactive)
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-    
-    const oldSessions = await Session.deleteMany({
-      status: 'disconnected',
-      lastActivity: { $lt: sevenDaysAgo }
-    });
-
-    console.log(`✅ Cleanup: ${messageResult.deletedCount} messages, ${oldUploads.length} uploads, ${oldSessions.deletedCount} sessions`);
-  } catch (error) {
-    console.error('❌ Error during cleanup:', error);
-  }
-}
-
-// Schedule cleanup
-cron.schedule('0 2 * * *', cleanupOldData);
-cron.schedule('0 */6 * * *', () => {
-  console.log(`📊 Active sessions: ${sessionManager.activeSessions.size}`);
+  });
 });
 
 // Health check endpoint
@@ -1416,7 +1373,153 @@ app.post('/api/sessions/logout-all', authenticateToken, async (req, res) => {
   }
 });
 
-// Enhanced Socket.IO handling
+// Additional API endpoints
+app.get('/api/sessions/:sessionId/groups', authenticateToken, async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const session = sessionManager.getSession(sessionId);
+
+    if (!session || session.data.userId !== req.user._id.toString()) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    res.json({
+      sessionId,
+      groups: session.data.groups || [],
+      phoneNumber: session.data.phoneNumber,
+      status: session.data.status
+    });
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/messages/logs', authenticateToken, async (req, res) => {
+  try {
+    const { page = 1, limit = 50, sessionId, status } = req.query;
+    const query = { userId: req.user._id };
+    
+    if (sessionId) query.sessionId = sessionId;
+    if (status) query.status = status;
+
+    const messages = await MessageLog.find(query)
+      .sort({ sentAt: -1 })
+      .limit(limit * 1)
+      .skip((page - 1) * limit)
+      .exec();
+
+    const total = await MessageLog.countDocuments(query);
+
+    res.json({
+      messages,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    });
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/dashboard/stats', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const userSessions = sessionManager.getUserSessions(userId.toString());
+    
+    const connectedSessions = userSessions.filter(s => s.status === 'connected');
+    const totalGroups = userSessions.reduce((sum, s) => sum + (s.groupCount || 0), 0);
+    
+    const totalMessages = await MessageLog.countDocuments({ userId });
+    const todayMessages = await MessageLog.countDocuments({
+      userId,
+      sentAt: { $gte: new Date().setHours(0, 0, 0, 0) }
+    });
+
+    const failedMessages = await MessageLog.countDocuments({
+      userId,
+      status: 'failed'
+    });
+
+    res.json({
+      sessions: {
+        total: userSessions.length,
+        connected: connectedSessions.length,
+        totalGroups
+      },
+      messages: {
+        total: totalMessages,
+        today: todayMessages,
+        failed: failedMessages,
+        successRate: totalMessages > 0 ? ((totalMessages - failedMessages) / totalMessages * 100).toFixed(1) : 0
+      },
+      lastLogin: req.user.lastLogin
+    });
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// User settings endpoint
+app.put('/api/user/settings', authenticateToken, async (req, res) => {
+  try {
+    const { bulkMessageDelay, maxRetries, autoReconnect } = req.body;
+    
+    const updateData = {};
+    if (bulkMessageDelay !== undefined) updateData['settings.bulkMessageDelay'] = bulkMessageDelay;
+    if (maxRetries !== undefined) updateData['settings.maxRetries'] = maxRetries;
+    if (autoReconnect !== undefined) updateData['settings.autoReconnect'] = autoReconnect;
+
+    const user = await User.findByIdAndUpdate(
+      req.user._id,
+      { $set: updateData },
+      { new: true, select: '-password' }
+    );
+
+    res.json({ success: true, user });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Error handling middleware
+app.use((error, req, res, next) => {
+  console.error('Express error:', error);
+  
+  if (error.code === 'LIMIT_FILE_SIZE') {
+    return res.status(400).json({ error: 'File too large' });
+  }
+  
+  if (error.message === 'Invalid file type') {
+    return res.status(400).json({ error: 'Invalid file type' });
+  }
+  
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('🛑 Shutting down gracefully...');
+  
+  const cleanupPromises = Array.from(sessionManager.activeSessions.keys())
+    .map(sessionId => sessionManager.cleanupSession(sessionId, 'shutdown'));
+  
+  await Promise.allSettled(cleanupPromises);
+  await mongoose.disconnect();
+  
+  console.log('✅ Server shutdown complete');
+  process.exit(0);
+});
+
+// Start server
+
+
+// Socket.IO connection handling
 io.use(authenticateSocket);
 
 io.on('connection', (socket) => {
@@ -1641,148 +1744,73 @@ io.on('connection', (socket) => {
   });
 });
 
-// Additional API endpoints
-app.get('/api/sessions/:sessionId/groups', authenticateToken, async (req, res) => {
+// Cleanup functions
+async function cleanupOldData() {
   try {
-    const { sessionId } = req.params;
-    const session = sessionManager.getSession(sessionId);
+    // Clean old messages (30 days)
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    
+    const messageResult = await MessageLog.deleteMany({
+      sentAt: { $lt: thirtyDaysAgo }
+    });
 
-    if (!session || session.data.userId !== req.user._id.toString()) {
-      return res.status(404).json({ error: 'Session not found' });
+    // Clean old uploads (90 days)
+    const ninetyDaysAgo = new Date();
+    ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
+    
+    const oldUploads = await Upload.find({
+      uploadedAt: { $lt: ninetyDaysAgo }
+    });
+
+    for (const upload of oldUploads) {
+      if (fs.existsSync(upload.path)) {
+        await safeDelete(upload.path);
+      }
+      await Upload.findByIdAndDelete(upload._id);
     }
 
-    res.json({
-      sessionId,
-      groups: session.data.groups || [],
-      phoneNumber: session.data.phoneNumber,
-      status: session.data.status
+    // Clean old disconnected sessions (7 days inactive)
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    
+    const oldSessions = await Session.deleteMany({
+      status: 'disconnected',
+      lastActivity: { $lt: sevenDaysAgo }
     });
 
+    console.log(`✅ Cleanup: ${messageResult.deletedCount} messages, ${oldUploads.length} uploads, ${oldSessions.deletedCount} sessions`);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('❌ Error during cleanup:', error);
   }
+}
+
+// Schedule cleanup
+cron.schedule('0 2 * * *', cleanupOldData);
+cron.schedule('0 */6 * * *', () => {
+  console.log(`📊 Active sessions: ${sessionManager.activeSessions.size}`);
 });
 
-app.get('/api/messages/logs', authenticateToken, async (req, res) => {
+
+
+// Initialize default user if none exists
+async function initializeDefaultUser() {
   try {
-    const { page = 1, limit = 50, sessionId, status } = req.query;
-    const query = { userId: req.user._id };
-    
-    if (sessionId) query.sessionId = sessionId;
-    if (status) query.status = status;
-
-    const messages = await MessageLog.find(query)
-      .sort({ sentAt: -1 })
-      .limit(limit * 1)
-      .skip((page - 1) * limit)
-      .exec();
-
-    const total = await MessageLog.countDocuments(query);
-
-    res.json({
-      messages,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total,
-        pages: Math.ceil(total / limit)
-      }
-    });
-
+    const existingUser = await User.findOne({ username: 'admin' });
+    if (!existingUser) {
+      const hashedPassword = await bcrypt.hash('admin123', 10);
+      await User.create({
+        username: 'admin',
+        email: 'admin@example.com',
+        password: hashedPassword,
+        isActive: true
+      });
+      console.log('✅ Default admin user created');
+    }
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('❌ Error creating default user:', error);
   }
-});
-
-app.get('/api/dashboard/stats', authenticateToken, async (req, res) => {
-  try {
-    const userId = req.user._id;
-    const userSessions = sessionManager.getUserSessions(userId.toString());
-    
-    const connectedSessions = userSessions.filter(s => s.status === 'connected');
-    const totalGroups = userSessions.reduce((sum, s) => sum + (s.groupCount || 0), 0);
-    
-    const totalMessages = await MessageLog.countDocuments({ userId });
-    const todayMessages = await MessageLog.countDocuments({
-      userId,
-      sentAt: { $gte: new Date().setHours(0, 0, 0, 0) }
-    });
-
-    const failedMessages = await MessageLog.countDocuments({
-      userId,
-      status: 'failed'
-    });
-
-    res.json({
-      sessions: {
-        total: userSessions.length,
-        connected: connectedSessions.length,
-        totalGroups
-      },
-      messages: {
-        total: totalMessages,
-        today: todayMessages,
-        failed: failedMessages,
-        successRate: totalMessages > 0 ? ((totalMessages - failedMessages) / totalMessages * 100).toFixed(1) : 0
-      },
-      lastLogin: req.user.lastLogin
-    });
-
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// User settings endpoint
-app.put('/api/user/settings', authenticateToken, async (req, res) => {
-  try {
-    const { bulkMessageDelay, maxRetries, autoReconnect } = req.body;
-    
-    const updateData = {};
-    if (bulkMessageDelay !== undefined) updateData['settings.bulkMessageDelay'] = bulkMessageDelay;
-    if (maxRetries !== undefined) updateData['settings.maxRetries'] = maxRetries;
-    if (autoReconnect !== undefined) updateData['settings.autoReconnect'] = autoReconnect;
-
-    const user = await User.findByIdAndUpdate(
-      req.user._id,
-      { $set: updateData },
-      { new: true, select: '-password' }
-    );
-
-    res.json({ success: true, user });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Error handling middleware
-app.use((error, req, res, next) => {
-  console.error('Express error:', error);
-  
-  if (error.code === 'LIMIT_FILE_SIZE') {
-    return res.status(400).json({ error: 'File too large' });
-  }
-  
-  if (error.message === 'Invalid file type') {
-    return res.status(400).json({ error: 'Invalid file type' });
-  }
-  
-  res.status(500).json({ error: 'Internal server error' });
-});
-
-// Graceful shutdown
-process.on('SIGINT', async () => {
-  console.log('🛑 Shutting down gracefully...');
-  
-  const cleanupPromises = Array.from(sessionManager.activeSessions.keys())
-    .map(sessionId => sessionManager.cleanupSession(sessionId, 'shutdown'));
-  
-  await Promise.allSettled(cleanupPromises);
-  await mongoose.disconnect();
-  
-  console.log('✅ Server shutdown complete');
-  process.exit(0);
-});
+}
 
 // Start server
 async function startServer() {

@@ -22,15 +22,28 @@ const app = express();
 const server = createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: ["http://localhost:5173", "http://localhost:5174"],
-    methods: ["GET", "POST"]
+    origin: [
+      "http://localhost:5173", 
+      "http://localhost:5174",
+      "https://dizihub.onrender.com",
+      process.env.CLIENT_URL
+    ].filter(Boolean), // Remove undefined values
+    methods: ["GET", "POST"],
+    credentials: true
   }
 });
 
+// FIXED: Enhanced CORS configuration
 app.use(cors({
-  origin: process.env.CLIENT_URL || "http://localhost:5173",
+  origin: [
+    "http://localhost:5173", 
+    "http://localhost:5174",
+    "https://dizihub.onrender.com",
+    process.env.CLIENT_URL
+  ].filter(Boolean),
   credentials: true
 }));
+
 app.use(express.json());
 
 // MongoDB Connection
@@ -1776,7 +1789,7 @@ async function startServer() {
   await initializeDefaultUser();
   
   const PORT = process.env.PORT || 3001;
-  server.listen(PORT, () => {
+  server.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Enhanced WhatsApp Server running on port ${PORT}`);
     console.log(`🔐 Features: Database Persistence, Smart Reconnect, Message Queue`);
     console.log(`🌐 Server URL: http://localhost:${PORT}`);

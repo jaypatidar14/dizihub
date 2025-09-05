@@ -26,6 +26,7 @@ const io = new Server(server, {
       "http://localhost:5173", 
       "http://localhost:5174",
       "https://dizihub.onrender.com",
+       "https://your-frontend-name.onrender.com" ,
       process.env.CLIENT_URL
     ].filter(Boolean), // Remove undefined values
     methods: ["GET", "POST"],

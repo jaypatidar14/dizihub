@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useReducer, useEffect, ReactNode, useCallback, useRef } from 'react';
 import { io, Socket } from 'socket.io-client';
-
+import config from '../config'; // Adjust the import as needed  
 export interface WhatsAppGroup {
   id: string;
   name: string;
@@ -245,7 +245,7 @@ export const CampaignProvider: React.FC<CampaignProviderProps> = ({ children }) 
     socketInitializing.current = true;
 
     // Initialize socket connection with authentication
-    const socket = io('http://localhost:3001', {
+    const socket = io(config.SOCKET_URL || 'http://localhost:3001', {
       autoConnect: true,
       reconnection: true,
       reconnectionDelay: 1000,

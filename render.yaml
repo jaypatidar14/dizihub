@@ -1,16 +1,10 @@
-# Create this file as render.yaml in your project root
 services:
   - type: web
-    name: whatsapp-campaign-manager
+    name: whatsapp-backend
     env: node
     buildCommand: npm install
-    startCommand: npm start
+    startCommand: node server/index.js
     healthCheckPath: /health
     envVars:
       - key: NODE_ENV
         value: production
-      - key: CLIENT_URL
-        value: https://dizihub.onrender.com
-    scaling:
-      minInstances: 1
-      maxInstances: 1

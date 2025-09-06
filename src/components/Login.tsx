@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Smartphone, Lock, User, Eye, EyeOff } from 'lucide-react';
+import config from '../config';
 
 interface LoginProps {
   onLogin: (token: string, user: any) => void;
@@ -18,7 +19,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
     setError('');
 
     try {
-      const response = await fetch('http://localhost:3001/api/auth/login', {
+      const response = await fetch(`${config.API_BASE_URL}/api/auth/login`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

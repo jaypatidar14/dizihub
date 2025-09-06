@@ -1,10 +1,11 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import { CampaignProvider, useCampaign } from './contexts/CampaignContext';
 import { NotificationProvider, useNotifications } from './contexts/NotificationContext';
 import Dashboard from './components/Dashboard';
 import Login from './components/Login';
 import NotificationSystem from './components/NotificationSystem';
+import config from './config';
 import './index.css';
 
 // Component that initializes the socket after CampaignProvider is ready
@@ -47,63 +48,87 @@ function NotificationSystemWrapper() {
   );
 }
 
+interface User {
+  id: string;
+  username: string;
+  email: string;
+  lastLogin?: string;
+  settings?: any;
+}
+
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
+  const [user, setUser] = useState<User | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Check if user is already authenticated
-    const token = localStorage.getItem('whatsapp_auth_token');
-    const savedUser = localStorage.getItem('whatsapp_user');
+    const checkAuth = async () => {
+      const token = localStorage.getItem('whatsapp_auth_token'); // Updated key
+      if (!token) {
+        setLoading(false);
+        return;
+      }
 
-    if (token && savedUser) {
-      // Validate token with server
-      fetch('http://localhost:3001/api/auth/validate', {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      })
-      .then(response => response.json())
-      .then(data => {
-        if (data.success) {
+      try {
+        // FIX: Use config instead of hardcoded URL
+        const response = await fetch(`${config.API_BASE_URL}/api/auth/validate`, {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          setUser(data.user);
           setIsAuthenticated(true);
         } else {
-          // Token is invalid, clear storage
           localStorage.removeItem('whatsapp_auth_token');
           localStorage.removeItem('whatsapp_user');
         }
-        setIsLoading(false);
-      })
-      .catch(() => {
-        // Server error, clear storage
+      } catch (error) {
+        console.error('Auth check failed:', error);
         localStorage.removeItem('whatsapp_auth_token');
         localStorage.removeItem('whatsapp_user');
-        setIsLoading(false);
-      });
-    } else {
-      setIsLoading(false);
-    }
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    checkAuth();
   }, []);
 
-  const handleLogin = (_token: string, _userData: any) => {
+  const handleLogin = (token: string, userData: User) => {
+    setUser(userData);
     setIsAuthenticated(true);
+    localStorage.setItem('whatsapp_auth_token', token);
+    localStorage.setItem('whatsapp_user', JSON.stringify(userData));
   };
 
-  if (isLoading) {
+  const handleLogout = () => {
+    setIsAuthenticated(false);
+    setUser(null);
+    localStorage.removeItem('whatsapp_auth_token');
+    localStorage.removeItem('whatsapp_user');
+  };
+
+  if (loading) {
     return (
-      <div className="min-h-screen bg-gray-900 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-400"></div>
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-600">Loading...</p>
+        </div>
       </div>
     );
   }
 
-  if (!isAuthenticated) {
-    return <Login onLogin={handleLogin} />;
-  }
-
   return (
     <CampaignProvider>
-      <AuthenticatedApp />
+      {!isAuthenticated ? (
+        <Login onLogin={handleLogin} />
+      ) : (
+        <AuthenticatedApp />
+      )}
     </CampaignProvider>
   );
 }

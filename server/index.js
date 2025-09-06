@@ -25,7 +25,7 @@ const io = new Server(server, {
     origin: [
       "http://localhost:5173", 
       "http://localhost:5174",
-      
+      "https://your-frontend-render-url.onrender.app",
       
       process.env.CLIENT_URL
     ].filter(Boolean), // Remove undefined values

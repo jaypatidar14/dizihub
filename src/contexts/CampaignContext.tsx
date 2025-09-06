@@ -245,7 +245,7 @@ export const CampaignProvider: React.FC<CampaignProviderProps> = ({ children }) 
     socketInitializing.current = true;
 
     // Initialize socket connection with authentication
-    const socket = io(config.SOCKET_URL || 'http://localhost:3001', {
+    const socket = io(config.SOCKET_URL, {
       autoConnect: true,
       reconnection: true,
       reconnectionDelay: 1000,
@@ -812,7 +812,7 @@ export const CampaignProvider: React.FC<CampaignProviderProps> = ({ children }) 
     // Make API call to logout all sessions
     const token = localStorage.getItem('token');
     if (token) {
-      fetch('/api/sessions/logout-all', {
+      fetch(`${config.API_BASE_URL}/api/sessions/logout-all`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,

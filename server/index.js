@@ -25,7 +25,7 @@ const io = new Server(server, {
     origin: [
       "http://localhost:5173", 
       "http://localhost:5174",
-      "https://dizihub-jv1r.onrender.com",
+      "https://dizihub.onrender.com",
       
       process.env.CLIENT_URL
     ].filter(Boolean), // Remove undefined values
@@ -39,7 +39,7 @@ app.use(cors({
   origin: [
     "http://localhost:5173", 
     "http://localhost:5174",
-    "https://dizihub-jv1r.onrender.com",
+    "https://dizihub.onrender.com",
     process.env.CLIENT_URL
   ].filter(Boolean),
   credentials: true

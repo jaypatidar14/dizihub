@@ -22,6 +22,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
       const response = await fetch(`${config.API_BASE_URL}/api/auth/login`, {
         method: 'POST',
         headers: {
+          'Authorization': `Bearer ${localStorage.getItem('whatsapp_auth_token')}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ username, password }),

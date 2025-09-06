@@ -5,8 +5,8 @@ interface Config {
 }
 
 const config: Config = {
-  API_BASE_URL: import.meta.env.VITE_API_URL || "http://localhost:3001",
-  SOCKET_URL: import.meta.env.VITE_SOCKET_URL || "http://localhost:3001",
+    API_BASE_URL: import.meta.env.VITE_API_URL || "https://dizihub-jv1r.onrender.com",
+  SOCKET_URL: import.meta.env.VITE_SOCKET_URL || "https://dizihub-jv1r.onrender.com",
 };
 
 export default config;
